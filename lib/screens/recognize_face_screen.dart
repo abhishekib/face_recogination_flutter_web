@@ -22,6 +22,11 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
   String _status = 'Initializing camera...';
   double _confidence = 0.0;
 
+  // Camera switching variables
+  int _currentCameraIndex = 0;
+  List<CameraDescription> _availableCameras = [];
+  bool _isSwitchingCamera = false;
+
   @override
   void initState() {
     super.initState();
@@ -36,8 +41,27 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
       return;
     }
 
+    _availableCameras = cameras;
+
+    // Try to find front camera first (better for face recognition)
+    _currentCameraIndex = _availableCameras.indexWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+    );
+
+    // If no front camera found, use the first available camera
+    if (_currentCameraIndex == -1) {
+      _currentCameraIndex = 0;
+    }
+
+    await _setupCamera(_currentCameraIndex);
+  }
+
+  Future<void> _setupCamera(int cameraIndex) async {
+    // Dispose of the previous controller
+    await _cameraController?.dispose();
+
     _cameraController = CameraController(
-      cameras.first,
+      _availableCameras[cameraIndex],
       ResolutionPreset.medium,
     );
 
@@ -46,6 +70,7 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
       if (mounted) {
         setState(() {
           _isInitialized = true;
+          _isSwitchingCamera = false;
           _status = 'Look at the camera for recognition';
         });
         _startContinuousRecognition();
@@ -53,21 +78,39 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
     } catch (e) {
       setState(() {
         _status = 'Camera initialization failed: $e';
+        _isInitialized = false;
+        _isSwitchingCamera = false;
       });
     }
   }
 
+  Future<void> _switchCamera() async {
+    if (_availableCameras.length <= 1 || _isSwitchingCamera) return;
+
+    setState(() {
+      _isSwitchingCamera = true;
+      _isInitialized = false;
+      _status = 'Switching camera...';
+      _recognizedUser = ''; // Clear previous recognition
+      _confidence = 0.0;
+    });
+
+    // Switch to the next camera
+    _currentCameraIndex = (_currentCameraIndex + 1) % _availableCameras.length;
+    await _setupCamera(_currentCameraIndex);
+  }
+
   Future<void> _startContinuousRecognition() async {
-    while (mounted && _isInitialized) {
+    while (mounted && _isInitialized && !_isSwitchingCamera) {
       await Future.delayed(const Duration(milliseconds: 1500));
-      if (!_isRecognizing && mounted) {
+      if (!_isRecognizing && mounted && !_isSwitchingCamera) {
         _performRecognition();
       }
     }
   }
 
   Future<void> _performRecognition() async {
-    if (!_isInitialized || _isRecognizing) return;
+    if (!_isInitialized || _isRecognizing || _isSwitchingCamera) return;
 
     setState(() {
       _isRecognizing = true;
@@ -80,6 +123,9 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
       // Simulate face recognition processing
       await Future.delayed(const Duration(milliseconds: 800));
 
+      // Check if still mounted and not switching camera
+      if (!mounted || _isSwitchingCamera) return;
+
       final users = await _storageService.getAllUsers();
       if (users.isNotEmpty) {
         // Simulate recognition result (in real app, compare face embeddings)
@@ -88,7 +134,7 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
           users,
         );
 
-        if (mounted) {
+        if (mounted && !_isSwitchingCamera) {
           setState(() {
             if (recognitionResult['confidence'] > 0.6) {
               _recognizedUser = recognitionResult['name'];
@@ -103,7 +149,7 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
         }
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && !_isSwitchingCamera) {
         setState(() {
           _status = 'Recognition failed: $e';
         });
@@ -115,6 +161,18 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
         });
       }
     }
+  }
+
+  String _getCameraInfo() {
+    if (_availableCameras.isEmpty ||
+        _currentCameraIndex >= _availableCameras.length) {
+      return '';
+    }
+
+    final camera = _availableCameras[_currentCameraIndex];
+    return camera.lensDirection == CameraLensDirection.front
+        ? 'Front Camera'
+        : 'Back Camera';
   }
 
   @override
@@ -130,6 +188,19 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
         title: const Text('Face Recognition'),
         backgroundColor: Colors.green[600],
         foregroundColor: Colors.white,
+        actions: [
+          // Camera info
+          if (_availableCameras.isNotEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 8.0),
+                child: Text(
+                  _getCameraInfo(),
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -140,15 +211,41 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
               color: Colors.black,
               child: Stack(
                 children: [
-                  if (_isInitialized)
+                  // Camera preview
+                  if (_isInitialized && !_isSwitchingCamera)
                     CameraPreview(_cameraController!)
                   else
                     const Center(
                       child: CircularProgressIndicator(color: Colors.white),
                     ),
 
+                  // Camera switch button (positioned over the camera preview)
+                  if (_availableCameras.length > 1)
+                    Positioned(
+                      top: 16,
+                      right: 16,
+                      child: FloatingActionButton(
+                        mini: true,
+                        onPressed: _isSwitchingCamera ? null : _switchCamera,
+                        backgroundColor: Colors.black.withOpacity(0.6),
+                        child: _isSwitchingCamera
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.flip_camera_ios,
+                                color: Colors.white,
+                              ),
+                      ),
+                    ),
+
                   // Face detection overlay
-                  if (_recognizedUser.isNotEmpty)
+                  if (_recognizedUser.isNotEmpty && !_isSwitchingCamera)
                     Positioned(
                       top: 50,
                       left: 0,
@@ -218,7 +315,9 @@ class _RecognizeFaceScreenState extends State<RecognizeFaceScreen> {
                   children: [
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed: _performRecognition,
+                        onPressed: _isInitialized && !_isSwitchingCamera
+                            ? _performRecognition
+                            : null,
                         icon: const Icon(Icons.refresh),
                         label: const Text('Scan Again'),
                       ),
